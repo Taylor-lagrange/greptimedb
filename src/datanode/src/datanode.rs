@@ -29,7 +29,7 @@ use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue}
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{error, info};
 use file_engine::engine::FileRegionEngine;
 use futures::future;
 use futures_util::future::try_join_all;
@@ -66,7 +66,6 @@ use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
     RegionServerEventReceiver,
 };
-use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
 use crate::region_server::{DummyTableProviderFactory, RegionServer};
 use crate::store;
@@ -81,7 +80,6 @@ pub struct Datanode {
     heartbeat_task: Option<HeartbeatTask>,
     region_event_receiver: Option<RegionServerEventReceiver>,
     region_server: RegionServer,
-    greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
 }
@@ -93,15 +91,7 @@ impl Datanode {
         self.start_heartbeat().await?;
         self.wait_coordinated().await;
 
-        self.start_telemetry();
-
         self.start_services().await
-    }
-
-    pub fn start_telemetry(&self) {
-        if let Err(e) = self.greptimedb_telemetry_task.start() {
-            warn!(e; "Failed to start telemetry task!");
-        }
     }
 
     pub async fn start_heartbeat(&mut self) -> Result<()> {
@@ -139,7 +129,10 @@ impl Datanode {
     pub async fn shutdown(&self) -> Result<()> {
         // We must shutdown services first
         self.shutdown_services().await?;
-        let _ = self.greptimedb_telemetry_task.stop().await;
+        if let Some(greptimedb_telemetry_task) = self.plugins.get::<Arc<GreptimeDBTelemetryTask>>()
+        {
+            let _ = greptimedb_telemetry_task.stop().await;
+        }
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task
                 .close()
@@ -263,13 +256,6 @@ impl DatanodeBuilder {
 
         let services = self.create_datanode_services(&region_server)?;
 
-        let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
-            Some(self.opts.storage.data_home.clone()),
-            mode,
-            self.opts.enable_telemetry,
-        )
-        .await;
-
         let leases_notifier =
             if self.opts.require_lease_before_startup && matches!(mode, Mode::Distributed) {
                 Some(Arc::new(Notify::new()))
@@ -281,7 +267,6 @@ impl DatanodeBuilder {
             services,
             heartbeat_task,
             region_server,
-            greptimedb_telemetry_task,
             region_event_receiver,
             leases_notifier,
             plugins: self.plugins.clone(),

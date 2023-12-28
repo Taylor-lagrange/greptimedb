@@ -20,6 +20,7 @@ use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::wal::StandaloneWalConfig;
 use common_config::{metadata_store_dir, KvBackendConfig};
+use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
@@ -30,8 +31,8 @@ use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
-use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
+use common_telemetry::{info, warn};
 use common_time::timezone::set_default_timezone;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -194,8 +195,6 @@ impl App for Instance {
     }
 
     async fn start(&mut self) -> Result<()> {
-        self.datanode.start_telemetry();
-
         self.procedure_manager
             .start()
             .await
@@ -208,6 +207,15 @@ impl App for Instance {
 
         if let Some(export_metrics_task) = self.frontend.plugins().get::<ExportMetricsTask>() {
             export_metrics_task.start();
+        }
+        if let Some(greptimedb_telemetry_task) = self
+            .datanode
+            .plugins()
+            .get::<Arc<GreptimeDBTelemetryTask>>()
+        {
+            if let Err(e) = greptimedb_telemetry_task.start() {
+                warn!(e; "Failed to start telemetry task!");
+            }
         }
 
         self.frontend.start().await.context(StartFrontendSnafu)?;

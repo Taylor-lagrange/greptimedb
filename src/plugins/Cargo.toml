@@ -7,8 +7,10 @@ license.workspace = true
 [dependencies]
 auth.workspace = true
 common-base.workspace = true
+common-greptimedb-telemetry.workspace = true
+common-telemetry.workspace = true
 datanode.workspace = true
 frontend.workspace = true
 meta-srv.workspace = true
-snafu.workspace = true
 servers.workspace = true
+snafu.workspace = true
