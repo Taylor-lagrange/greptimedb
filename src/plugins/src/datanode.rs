@@ -14,12 +14,24 @@
 
 use common_base::Plugins;
 use datanode::config::DatanodeOptions;
-use datanode::error::Result;
+use datanode::error::{Result, StartServerSnafu};
+use servers::export_metrics::ExportMetricsTask;
+use snafu::ResultExt;
 
-pub async fn setup_datanode_plugins(_opts: &mut DatanodeOptions) -> Result<Plugins> {
-    Ok(Plugins::new())
+pub async fn setup_datanode_plugins(opts: &mut DatanodeOptions) -> Result<Plugins> {
+    let plugins = Plugins::new();
+    if let Some(export_metrics_task) =
+        ExportMetricsTask::try_new(&opts.export_metrics, None, Some(&plugins))
+            .context(StartServerSnafu)?
+    {
+        plugins.insert(export_metrics_task);
+    }
+    Ok(plugins)
 }
 
-pub async fn start_datanode_plugins(_plugins: Plugins) -> Result<()> {
+pub async fn start_datanode_plugins(plugins: Plugins) -> Result<()> {
+    if let Some(export_metrics_task) = plugins.get::<ExportMetricsTask>() {
+        export_metrics_task.start();
+    }
     Ok(())
 }

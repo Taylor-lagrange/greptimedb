@@ -6288,6 +6288,7 @@ dependencies = [
  "datanode",
  "frontend",
  "meta-srv",
+ "servers",
  "snafu",
 ]
 

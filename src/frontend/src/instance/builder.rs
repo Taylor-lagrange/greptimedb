@@ -27,7 +27,9 @@ use operator::statement::StatementExecutor;
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use query::QueryEngineFactory;
+use servers::export_metrics::ExportMetricsTask;
 
+use super::prom_store::ExportMetricHandler;
 use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::region_query::FrontendRegionQueryHandler;
@@ -134,6 +136,15 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
+        if let Some(mut export_metrics_task) = plugins.get::<ExportMetricsTask>() {
+            if export_metrics_task.send_by_handler {
+                let handler =
+                    ExportMetricHandler::new_handler(inserter.clone(), statement_executor.clone());
+                export_metrics_task.set_handler(handler);
+                plugins.insert(export_metrics_task);
+            }
+        }
+
         Ok(Instance {
             catalog_manager,
             script_executor,
@@ -144,7 +155,6 @@ impl FrontendBuilder {
             heartbeat_task: self.heartbeat_task,
             inserter,
             deleter,
-            export_metrics_task: None,
         })
     }
 }

@@ -11,3 +11,4 @@ datanode.workspace = true
 frontend.workspace = true
 meta-srv.workspace = true
 snafu.workspace = true
+servers.workspace = true

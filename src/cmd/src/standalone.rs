@@ -45,7 +45,7 @@ use frontend::service_config::{
 };
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
-use servers::export_metrics::ExportMetricsOption;
+use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
@@ -205,6 +205,10 @@ impl App for Instance {
             .start()
             .await
             .context(StartWalOptionsAllocatorSnafu)?;
+
+        if let Some(export_metrics_task) = self.frontend.plugins().get::<ExportMetricsTask>() {
+            export_metrics_task.start();
+        }
 
         self.frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())

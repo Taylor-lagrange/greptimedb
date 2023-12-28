@@ -13,13 +13,25 @@
 // limitations under the License.
 
 use common_base::Plugins;
-use meta_srv::error::Result;
+use meta_srv::error::{InitExportMetricsTaskSnafu, Result};
 use meta_srv::metasrv::MetaSrvOptions;
+use servers::export_metrics::ExportMetricsTask;
+use snafu::ResultExt;
 
-pub async fn setup_meta_srv_plugins(_opts: &mut MetaSrvOptions) -> Result<Plugins> {
-    Ok(Plugins::new())
+pub async fn setup_meta_srv_plugins(opts: &mut MetaSrvOptions) -> Result<Plugins> {
+    let plugins = Plugins::new();
+    if let Some(export_metrics_task) =
+        ExportMetricsTask::try_new(&opts.export_metrics, None, Some(&plugins))
+            .context(InitExportMetricsTaskSnafu)?
+    {
+        plugins.insert(export_metrics_task);
+    }
+    Ok(plugins)
 }
 
-pub async fn start_meta_srv_plugins(_plugins: Plugins) -> Result<()> {
+pub async fn start_meta_srv_plugins(plugins: Plugins) -> Result<()> {
+    if let Some(export_metrics_task) = plugins.get::<ExportMetricsTask>() {
+        export_metrics_task.start();
+    }
     Ok(())
 }

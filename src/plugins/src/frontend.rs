@@ -14,8 +14,9 @@
 
 use auth::UserProviderRef;
 use common_base::Plugins;
-use frontend::error::{IllegalAuthConfigSnafu, Result};
+use frontend::error::{IllegalAuthConfigSnafu, Result, StartServerSnafu};
 use frontend::frontend::FrontendOptions;
+use servers::export_metrics::ExportMetricsTask;
 use snafu::ResultExt;
 
 pub async fn setup_frontend_plugins(opts: &FrontendOptions) -> Result<Plugins> {
@@ -27,9 +28,19 @@ pub async fn setup_frontend_plugins(opts: &FrontendOptions) -> Result<Plugins> {
         plugins.insert::<UserProviderRef>(provider);
     }
 
+    if let Some(export_metrics_task) =
+        ExportMetricsTask::try_new(&opts.export_metrics, Some(&opts.http.addr), Some(&plugins))
+            .context(StartServerSnafu)?
+    {
+        plugins.insert(export_metrics_task);
+    }
+
     Ok(plugins)
 }
 
-pub async fn start_frontend_plugins(_plugins: Plugins) -> Result<()> {
+pub async fn start_frontend_plugins(plugins: Plugins) -> Result<()> {
+    if let Some(export_metrics_task) = plugins.get::<ExportMetricsTask>() {
+        export_metrics_task.start();
+    }
     Ok(())
 }

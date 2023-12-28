@@ -63,6 +63,7 @@ pub struct ExportMetricsTask {
     filter: Option<MetricFilter>,
     headers: HeaderMap<HeaderValue>,
     pub send_by_handler: bool,
+    handler: Option<PromStoreProtocolHandlerRef>,
 }
 
 impl ExportMetricsTask {
@@ -129,16 +130,21 @@ impl ExportMetricsTask {
             filter,
             headers,
             send_by_handler,
+            handler: None,
         }))
     }
 
-    pub fn start(&self, handler: Option<PromStoreProtocolHandlerRef>) {
+    pub fn set_handler(&mut self, handler: PromStoreProtocolHandlerRef) {
+        self.handler = Some(handler);
+    }
+
+    pub fn start(&self) {
         if !self.config.enable {
             return;
         }
         let interval = time::interval(self.config.write_interval);
         let filter = self.filter.clone();
-        let _handle = if let Some(h) = handler {
+        let _handle = if let Some(h) = self.handler.clone() {
             common_runtime::spawn_bg(write_system_metric_by_handler(
                 self.config.db.clone(),
                 h,

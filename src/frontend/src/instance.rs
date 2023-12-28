@@ -55,7 +55,6 @@ use query::QueryEngineRef;
 use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
-use servers::export_metrics::ExportMetricsTask;
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
@@ -76,11 +75,9 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 
-use self::prom_store::ExportMetricHandler;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, ParseSqlSnafu,
-    PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, StartServerSnafu,
-    TableOperationSnafu,
+    PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, TableOperationSnafu,
 };
 use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::heartbeat::HeartbeatTask;
@@ -119,7 +116,6 @@ pub struct Instance {
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
-    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl Instance {
@@ -191,13 +187,6 @@ impl Instance {
         &mut self,
         opts: impl Into<FrontendOptions> + TomlSerializable,
     ) -> Result<()> {
-        let opts: FrontendOptions = opts.into();
-        self.export_metrics_task = ExportMetricsTask::try_new(
-            &opts.export_metrics,
-            Some(&opts.http.addr),
-            Some(&self.plugins),
-        )
-        .context(StartServerSnafu)?;
         let servers = Services::build(opts, Arc::new(self.clone()), self.plugins.clone()).await?;
         self.servers = Arc::new(servers);
 
@@ -232,18 +221,6 @@ impl FrontendInstance for Instance {
         }
 
         self.script_executor.start(self)?;
-
-        if let Some(t) = self.export_metrics_task.as_ref() {
-            if t.send_by_handler {
-                let handler = ExportMetricHandler::new_handler(
-                    self.inserter.clone(),
-                    self.statement_executor.clone(),
-                );
-                t.start(Some(handler))
-            } else {
-                t.start(None)
-            }
-        }
 
         futures::future::try_join_all(self.servers.iter().map(|(name, handler)| async move {
             info!("Starting service: {name}");

@@ -27,7 +27,6 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use etcd_client::Client;
 use servers::configurator::ConfiguratorRef;
-use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
@@ -38,7 +37,6 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
-use crate::error::InitExportMetricsTaskSnafu;
 use crate::lock::etcd::EtcdLock;
 use crate::lock::memory::MemLock;
 use crate::metasrv::builder::MetaSrvBuilder;
@@ -60,8 +58,6 @@ pub struct MetaSrvInstance {
     signal_sender: Option<Sender<()>>,
 
     plugins: Plugins,
-
-    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl MetaSrvInstance {
@@ -78,25 +74,17 @@ impl MetaSrvInstance {
         );
         // put meta_srv into plugins for later use
         plugins.insert::<Arc<MetaSrv>>(Arc::new(meta_srv.clone()));
-        let export_metrics_task =
-            ExportMetricsTask::try_new(&opts.export_metrics, None, Some(&plugins))
-                .context(InitExportMetricsTaskSnafu)?;
         Ok(MetaSrvInstance {
             meta_srv,
             http_srv,
             opts,
             signal_sender: None,
             plugins,
-            export_metrics_task,
         })
     }
 
     pub async fn start(&mut self) -> Result<()> {
         self.meta_srv.try_start().await?;
-
-        if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start(None)
-        }
 
         let (tx, rx) = mpsc::channel::<()>(1);
 
