@@ -62,6 +62,8 @@ impl DfLogicalPlanner {
             query_ctx.as_ref(),
         );
 
+        let tz = query_ctx.timezone().clone();
+
         let context_provider = DfContextProviderAdapter::try_new(
             self.engine_state.clone(),
             self.session_state.clone(),
@@ -81,7 +83,7 @@ impl DfLogicalPlanner {
         let result = sql_to_rel
             .statement_to_plan(df_stmt)
             .context(PlanSqlSnafu)?;
-        let plan = RangePlanRewriter::new(table_provider)
+        let plan = RangePlanRewriter::new(table_provider, Some(tz))
             .rewrite(result)
             .await?;
         Ok(LogicalPlan::DfPlan(plan))

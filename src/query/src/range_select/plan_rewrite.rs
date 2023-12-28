@@ -20,9 +20,10 @@ use std::time::Duration;
 use arrow_schema::DataType;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
+use chrono::FixedOffset;
 use common_time::interval::NANOS_PER_MILLI;
 use common_time::timestamp::TimeUnit;
-use common_time::{Interval, Timestamp};
+use common_time::{Interval, Timestamp, Timezone};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
@@ -52,6 +53,7 @@ pub struct RangeExprRewriter<'a> {
     input_plan: &'a Arc<LogicalPlan>,
     align: Duration,
     align_to: i64,
+    tz: Option<&'a Timezone>,
     by: Vec<Expr>,
     /// Use `BTreeSet` to avoid in case like `avg(a) RANGE '5m' + avg(a) RANGE '5m'`, duplicate range expr `avg(a) RANGE '5m'` be calculate twice
     range_fn: BTreeSet<RangeFn>,
@@ -133,14 +135,24 @@ fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
 /// which is used as the basis for dividing time slot during the align operation.
 /// 1. NOW: align to current execute time
 /// 2. Timestamp string: align to specific timestamp
-/// 3. leave empty (as Default Option): align to unix epoch 0
-fn parse_align_to(args: &[Expr], i: usize) -> DFResult<i64> {
+/// 3. leave empty (as Default Option):
+///     - user specifies the time zone in query context: align to user specify tz
+///     - else : align to unix epoch 0
+fn parse_align_to(args: &[Expr], i: usize, timezone: Option<&Timezone>) -> DFResult<i64> {
     let s = parse_str_expr(args, i)?;
     let upper = s.to_uppercase();
     match upper.as_str() {
         "NOW" => return Ok(Timestamp::current_millis().value()),
-        // default align to unix epoch 0
-        "" => return Ok(0),
+        "" => {
+            let offset = timezone
+                .map(|tz| {
+                    TryInto::<FixedOffset>::try_into(tz.clone())
+                        .map(|offset| (offset.utc_minus_local() * 1000) as i64)
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            return Ok(offset);
+        }
         _ => (),
     }
     Timestamp::from_str(s)
@@ -206,7 +218,7 @@ impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
                     .map_err(|e| DataFusionError::Plan(e.to_string()))?;
                 let by = parse_expr_list(&func.args, 4, byc)?;
                 let align = parse_duration_expr(&func.args, byc + 4)?;
-                let align_to = parse_align_to(&func.args, byc + 5)?;
+                let align_to = parse_align_to(&func.args, byc + 5, self.tz)?;
                 let mut data_type = range_expr.get_type(self.input_plan.schema())?;
                 let mut need_cast = false;
                 let fill = Fill::try_from_str(parse_str_expr(&func.args, 2)?, &data_type)?;
@@ -247,11 +259,16 @@ impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
 /// collecting info we need to generate RangeSelect Query LogicalPlan and rewrite th original LogicalPlan.
 pub struct RangePlanRewriter {
     table_provider: DfTableSourceProvider,
+    // Requires user-specified time zone in query context to determine default range align behavior
+    timezone: Option<Timezone>,
 }
 
 impl RangePlanRewriter {
-    pub fn new(table_provider: DfTableSourceProvider) -> Self {
-        Self { table_provider }
+    pub fn new(table_provider: DfTableSourceProvider, timezone: Option<Timezone>) -> Self {
+        Self {
+            table_provider,
+            timezone,
+        }
     }
 
     pub async fn rewrite(&mut self, plan: LogicalPlan) -> Result<LogicalPlan> {
@@ -295,6 +312,7 @@ impl RangePlanRewriter {
                     by: vec![],
                     range_fn: BTreeSet::new(),
                     sub_aggr: aggr_plan,
+                    tz: self.timezone.as_ref(),
                 };
                 let new_expr = expr
                     .iter()
@@ -747,15 +765,21 @@ mod test {
     fn test_parse_align_to() {
         // test NOW
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some("NOW".into())))];
-        let epsinon = parse_align_to(&args, 0).unwrap() - Timestamp::current_millis().value();
+        let epsinon = parse_align_to(&args, 0, None).unwrap() - Timestamp::current_millis().value();
         assert!(epsinon.abs() < 100);
-        // test default
-        let args = vec![Expr::Literal(ScalarValue::Utf8(Some("".into())))];
-        assert!(parse_align_to(&args, 0).unwrap() == 0);
         // test Timestamp
+        let chinese_time = -8 * 60 * 60 * 1000;
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some(
             "1970-01-01T00:00:00+08:00".into(),
         )))];
-        assert!(parse_align_to(&args, 0).unwrap() == -8 * 60 * 60 * 1000);
+        assert_eq!(parse_align_to(&args, 0, None).unwrap(), chinese_time);
+        // test default without tz
+        let args = vec![Expr::Literal(ScalarValue::Utf8(Some("".into())))];
+        assert_eq!(parse_align_to(&args, 0, None).unwrap(), 0);
+        // test default with tz
+        let tz1 = Timezone::from_tz_string("+08:00").unwrap();
+        let tz2 = Timezone::from_tz_string("Asia/Shanghai").unwrap();
+        assert_eq!(parse_align_to(&args, 0, Some(&tz1)).unwrap(), chinese_time);
+        assert_eq!(parse_align_to(&args, 0, Some(&tz2)).unwrap(), chinese_time);
     }
 }

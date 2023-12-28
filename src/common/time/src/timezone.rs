@@ -15,8 +15,8 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use chrono::FixedOffset;
-use chrono_tz::Tz;
+use chrono::{FixedOffset, TimeZone as ChronoTimezone};
+use chrono_tz::{OffsetComponents, Tz};
 use once_cell::sync::OnceCell;
 use snafu::{OptionExt, ResultExt};
 
@@ -101,6 +101,22 @@ impl Timezone {
             Ok(Self::Named(tz))
         } else {
             ParseTimezoneNameSnafu { raw: tz_string }.fail()
+        }
+    }
+}
+
+impl TryInto<FixedOffset> for Timezone {
+    type Error = String;
+    fn try_into(self) -> std::result::Result<FixedOffset, Self::Error> {
+        match self {
+            Timezone::Offset(offset) => Ok(offset),
+            Timezone::Named(tz) => {
+                let now = chrono::Utc::now().naive_utc();
+                let offset = tz.offset_from_utc_datetime(&now);
+                let offset = offset.base_utc_offset() + offset.dst_offset();
+                FixedOffset::east_opt(offset.num_seconds() as i32)
+                    .ok_or(format!("Can't convert tz `{}` to `FixedOffset`", tz))
+            }
         }
     }
 }
