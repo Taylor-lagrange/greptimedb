@@ -18,7 +18,7 @@ use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows, Value as GrpcValue};
 use catalog::CatalogManager;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use partition::manager::PartitionRuleManager;
-use session::context::QueryContext;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements;
 use sql::statements::insert::Insert;
@@ -54,7 +54,11 @@ impl<'a> StatementToRegion<'a> {
         }
     }
 
-    pub async fn convert(&self, stmt: &Insert) -> Result<RegionInsertRequests> {
+    pub async fn convert(
+        &self,
+        stmt: &Insert,
+        ctx: &QueryContextRef,
+    ) -> Result<RegionInsertRequests> {
         let (catalog, schema, table_name) = self.get_full_name(stmt.table_name())?;
         let table = self.get_table(&catalog, &schema, &table_name).await?;
         let table_schema = table.schema();
@@ -110,7 +114,7 @@ impl<'a> StatementToRegion<'a> {
             schema.push(grpc_column_schema);
 
             for (sql_row, grpc_row) in sql_rows.iter().zip(rows.iter_mut()) {
-                let value = sql_value_to_grpc_value(column_schema, &sql_row[i])?;
+                let value = sql_value_to_grpc_value(column_schema, &sql_row[i], ctx)?;
                 grpc_row.values.push(value);
             }
         }
@@ -169,7 +173,11 @@ fn column_names<'a>(stmt: &'a Insert, table_schema: &'a SchemaRef) -> Vec<&'a St
     }
 }
 
-fn sql_value_to_grpc_value(column_schema: &ColumnSchema, sql_val: &SqlValue) -> Result<GrpcValue> {
+fn sql_value_to_grpc_value(
+    column_schema: &ColumnSchema,
+    sql_val: &SqlValue,
+    ctx: &QueryContextRef,
+) -> Result<GrpcValue> {
     let column = &column_schema.name;
     let value = if replace_default(sql_val) {
         let default_value = column_schema
@@ -182,8 +190,13 @@ fn sql_value_to_grpc_value(column_schema: &ColumnSchema, sql_val: &SqlValue) -> 
             column: column.clone(),
         })?
     } else {
-        statements::sql_value_to_value(column, &column_schema.data_type, sql_val)
-            .context(ParseSqlSnafu)?
+        statements::sql_value_to_value(
+            column,
+            &column_schema.data_type,
+            sql_val,
+            Some(ctx.timezone()),
+        )
+        .context(ParseSqlSnafu)?
     };
 
     let grpc_value = value_to_grpc_value(value);

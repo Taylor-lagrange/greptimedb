@@ -30,6 +30,7 @@ use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::{info, tracing};
+use common_time::Timezone;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use lazy_static::lazy_static;
@@ -67,8 +68,9 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
-        let create_expr = &mut expr_factory::create_to_expr(&stmt, ctx)?;
-        self.create_table_inner(create_expr, stmt.partitions).await
+        let create_expr = &mut expr_factory::create_to_expr(&stmt, ctx.clone())?;
+        self.create_table_inner(create_expr, stmt.partitions, ctx)
+            .await
     }
 
     #[tracing::instrument(skip_all)]
@@ -77,14 +79,15 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        let create_expr = &mut expr_factory::create_external_expr(create_expr, ctx).await?;
-        self.create_table_inner(create_expr, None).await
+        let create_expr = &mut expr_factory::create_external_expr(create_expr, ctx.clone()).await?;
+        self.create_table_inner(create_expr, None, ctx).await
     }
 
     pub async fn create_table_inner(
         &self,
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
+        query_ctx: QueryContextRef,
     ) -> Result<TableRef> {
         let _timer = crate::metrics::DIST_CREATE_TABLE.start_timer();
         let schema = self
@@ -142,7 +145,8 @@ impl StatementExecutor {
             &create_table.table_name,
         );
 
-        let (partitions, partition_cols) = parse_partitions(create_table, partitions)?;
+        let (partitions, partition_cols) =
+            parse_partitions(create_table, partitions, Some(query_ctx.timezone()))?;
 
         validate_partition_columns(create_table, &partition_cols)?;
 
@@ -456,11 +460,13 @@ fn validate_partition_columns(
 fn parse_partitions(
     create_table: &CreateTableExpr,
     partitions: Option<Partitions>,
+    tz: Option<Timezone>,
 ) -> Result<(Vec<MetaPartition>, Vec<String>)> {
     // If partitions are not defined by user, use the timestamp column (which has to be existed) as
     // the partition column, and create only one partition.
     let partition_columns = find_partition_columns(&partitions)?;
-    let partition_entries = find_partition_entries(create_table, &partitions, &partition_columns)?;
+    let partition_entries =
+        find_partition_entries(create_table, &partitions, &partition_columns, tz)?;
 
     Ok((
         partition_entries
@@ -577,6 +583,7 @@ fn find_partition_entries(
     create_table: &CreateTableExpr,
     partitions: &Option<Partitions>,
     partition_columns: &[String],
+    tz: Option<Timezone>,
 ) -> Result<Vec<Vec<PartitionBound>>> {
     let entries = if let Some(partitions) = partitions {
         let column_defs = partition_columns
@@ -609,7 +616,8 @@ fn find_partition_entries(
                 let v = match v {
                     SqlValue::Number(n, _) if n == MAXVALUE => PartitionBound::MaxValue,
                     _ => PartitionBound::Value(
-                        sql_value_to_value(column_name, data_type, v).context(ParseSqlSnafu)?,
+                        sql_value_to_value(column_name, data_type, v, tz.clone())
+                            .context(ParseSqlSnafu)?,
                     ),
                 };
                 values.push(v);
@@ -702,7 +710,8 @@ ENGINE=mito",
             match &result[0] {
                 Statement::CreateTable(c) => {
                     let expr = expr_factory::create_to_expr(c, QueryContext::arc()).unwrap();
-                    let (partitions, _) = parse_partitions(&expr, c.partitions.clone()).unwrap();
+                    let (partitions, _) =
+                        parse_partitions(&expr, c.partitions.clone(), None).unwrap();
                     let json = serde_json::to_string(&partitions).unwrap();
                     assert_eq!(json, expected);
                 }

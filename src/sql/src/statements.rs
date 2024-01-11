@@ -36,7 +36,7 @@ use api::v1::add_column_location::LocationType;
 use api::v1::{AddColumnLocation as Location, SemanticType};
 use common_base::bytes::Bytes;
 use common_query::AddColumnLocation;
-use common_time::Timestamp;
+use common_time::{Timestamp, Timezone};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
@@ -61,6 +61,7 @@ fn parse_string_to_value(
     column_name: &str,
     s: String,
     data_type: &ConcreteDataType,
+    tz: Option<Timezone>,
 ) -> Result<Value> {
     ensure!(
         data_type.is_stringifiable(),
@@ -94,7 +95,7 @@ fn parse_string_to_value(
             }
         }
         ConcreteDataType::Timestamp(t) => {
-            if let Ok(ts) = Timestamp::from_str(&s) {
+            if let Ok(ts) = Timestamp::from_str(&s, tz) {
                 Ok(Value::Timestamp(ts.convert_to(t.unit()).context(
                     TimestampOverflowSnafu {
                         timestamp: ts,
@@ -215,6 +216,7 @@ pub fn sql_value_to_value(
     column_name: &str,
     data_type: &ConcreteDataType,
     sql_val: &SqlValue,
+    tz: Option<Timezone>,
 ) -> Result<Value> {
     let value = match sql_val {
         SqlValue::Number(n, _) => sql_number_to_value(data_type, n)?,
@@ -232,7 +234,7 @@ pub fn sql_value_to_value(
             (*b).into()
         }
         SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
-            parse_string_to_value(column_name, s.clone(), data_type)?
+            parse_string_to_value(column_name, s.clone(), data_type, tz)?
         }
         SqlValue::HexStringLiteral(s) => parse_hex_string(s)?,
         SqlValue::Placeholder(s) => return InvalidSqlValueSnafu { value: s }.fail(),
@@ -283,6 +285,7 @@ fn parse_column_default_constraint(
     column_name: &str,
     data_type: &ConcreteDataType,
     opts: &[ColumnOptionDef],
+    tz: Option<Timezone>,
 ) -> Result<Option<ColumnDefaultConstraint>> {
     if let Some(opt) = opts
         .iter()
@@ -290,7 +293,7 @@ fn parse_column_default_constraint(
     {
         let default_constraint = match &opt.option {
             ColumnOption::Default(Expr::Value(v)) => {
-                ColumnDefaultConstraint::Value(sql_value_to_value(column_name, data_type, v)?)
+                ColumnDefaultConstraint::Value(sql_value_to_value(column_name, data_type, v, tz)?)
             }
             ColumnOption::Default(Expr::Function(func)) => {
                 let mut func = format!("{func}").to_lowercase();
@@ -331,7 +334,11 @@ pub fn has_primary_key_option(column_def: &ColumnDef) -> bool {
 // TODO(yingwen): Make column nullable by default, and checks invalid case like
 // a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
-pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Result<ColumnSchema> {
+pub fn column_def_to_schema(
+    column_def: &ColumnDef,
+    is_time_index: bool,
+    tz: Option<Timezone>,
+) -> Result<ColumnSchema> {
     let is_nullable = column_def
         .options
         .iter()
@@ -341,7 +348,7 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
     let name = column_def.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&column_def.data_type)?;
     let default_constraint =
-        parse_column_default_constraint(&name, &data_type, &column_def.options)?;
+        parse_column_default_constraint(&name, &data_type, &column_def.options, tz)?;
 
     let mut column_schema = ColumnSchema::new(name, data_type, is_nullable)
         .with_time_index(is_time_index)
@@ -366,7 +373,10 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
 }
 
 /// Convert `ColumnDef` in sqlparser to `ColumnDef` in gRPC proto.
-pub fn sql_column_def_to_grpc_column_def(col: &ColumnDef) -> Result<api::v1::ColumnDef> {
+pub fn sql_column_def_to_grpc_column_def(
+    col: &ColumnDef,
+    tz: Option<Timezone>,
+) -> Result<api::v1::ColumnDef> {
     let name = col.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
 
@@ -375,7 +385,7 @@ pub fn sql_column_def_to_grpc_column_def(col: &ColumnDef) -> Result<api::v1::Col
         .iter()
         .all(|o| !matches!(o.option, ColumnOption::NotNull));
 
-    let default_constraint = parse_column_default_constraint(&name, &data_type, &col.options)?
+    let default_constraint = parse_column_default_constraint(&name, &data_type, &col.options, tz)?
         .map(ColumnDefaultConstraint::try_into) // serialize default constraint to bytes
         .transpose()
         .context(SerializeColumnDefaultConstraintSnafu)?;
@@ -631,29 +641,29 @@ mod tests {
         let sql_val = SqlValue::Null;
         assert_eq!(
             Value::Null,
-            sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val).unwrap()
+            sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val, None).unwrap()
         );
 
         let sql_val = SqlValue::Boolean(true);
         assert_eq!(
             Value::Boolean(true),
-            sql_value_to_value("a", &ConcreteDataType::boolean_datatype(), &sql_val).unwrap()
+            sql_value_to_value("a", &ConcreteDataType::boolean_datatype(), &sql_val, None).unwrap()
         );
 
         let sql_val = SqlValue::Number("3.0".to_string(), false);
         assert_eq!(
             Value::Float64(OrderedFloat(3.0)),
-            sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val).unwrap()
+            sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val, None).unwrap()
         );
 
         let sql_val = SqlValue::Number("3.0".to_string(), false);
-        let v = sql_value_to_value("a", &ConcreteDataType::boolean_datatype(), &sql_val);
+        let v = sql_value_to_value("a", &ConcreteDataType::boolean_datatype(), &sql_val, None);
         assert!(v.is_err());
         assert!(format!("{v:?}")
             .contains("Fail to parse number 3.0, invalid column type: Boolean(BooleanType)"));
 
         let sql_val = SqlValue::Boolean(true);
-        let v = sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val);
+        let v = sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val, None);
         assert!(v.is_err());
         assert!(
             format!("{v:?}").contains(
@@ -663,11 +673,12 @@ mod tests {
         );
 
         let sql_val = SqlValue::HexStringLiteral("48656c6c6f20776f726c6421".to_string());
-        let v = sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val).unwrap();
+        let v =
+            sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val, None).unwrap();
         assert_eq!(Value::Binary(Bytes::from(b"Hello world!".as_slice())), v);
 
         let sql_val = SqlValue::HexStringLiteral("9AF".to_string());
-        let v = sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val);
+        let v = sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val, None);
         assert!(v.is_err());
         assert!(
             format!("{v:?}").contains("odd number of digits"),
@@ -675,9 +686,37 @@ mod tests {
         );
 
         let sql_val = SqlValue::HexStringLiteral("AG".to_string());
-        let v = sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val);
+        let v = sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val, None);
         assert!(v.is_err());
         assert!(format!("{v:?}").contains("invalid character"), "v is {v:?}",);
+
+        let sql_val = SqlValue::DoubleQuotedString("1970-01-01 08:00:00+0800".to_string());
+        let v = sql_value_to_value(
+            "a",
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            &sql_val,
+            None,
+        )
+        .unwrap();
+        assert_eq!(v.to_string(), "1970-01-01 00:00:00+0000");
+        let sql_val = SqlValue::DoubleQuotedString("1970-01-01 08:00:00".to_string());
+        let v = sql_value_to_value(
+            "a",
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            &sql_val,
+            None,
+        )
+        .unwrap();
+        assert_eq!(v.to_string(), "1970-01-01 08:00:00+0000");
+        let sql_val = SqlValue::DoubleQuotedString("1970-01-01 08:00:00".to_string());
+        let v = sql_value_to_value(
+            "a",
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            &sql_val,
+            Some(Timezone::from_tz_string("Asia/Shanghai").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(v.to_string(), "1970-01-01 00:00:00+0000");
     }
 
     #[test]
@@ -686,6 +725,7 @@ mod tests {
             "date",
             &ConcreteDataType::date_datatype(),
             &SqlValue::DoubleQuotedString("2022-02-22".to_string()),
+            None,
         )
         .unwrap();
         assert_eq!(ConcreteDataType::date_datatype(), value.data_type());
@@ -703,6 +743,7 @@ mod tests {
             "datetime_col",
             &ConcreteDataType::datetime_datatype(),
             &SqlValue::DoubleQuotedString("2022-02-22 00:01:03+0800".to_string()),
+            None,
         )
         .unwrap();
         assert_eq!(ConcreteDataType::datetime_datatype(), value.data_type());
@@ -719,6 +760,7 @@ mod tests {
             "datetime_col",
             &ConcreteDataType::datetime_datatype(),
             &SqlValue::DoubleQuotedString("2022-02-22 00:01:61".to_string()),
+            None
         )
         .is_err());
     }
@@ -729,6 +771,7 @@ mod tests {
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
             &ConcreteDataType::timestamp_millisecond_datatype(),
+            None,
         )
         .unwrap()
         {
@@ -745,6 +788,7 @@ mod tests {
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
             &ConcreteDataType::timestamp_datatype(TimeUnit::Second),
+            None,
         )
         .unwrap()
         {
@@ -761,6 +805,7 @@ mod tests {
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
             &ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
+            None,
         )
         .unwrap()
         {
@@ -777,6 +822,7 @@ mod tests {
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
             &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+            None,
         )
         .unwrap()
         {
@@ -789,10 +835,45 @@ mod tests {
             }
         }
 
+        match parse_string_to_value(
+            "timestamp_col",
+            "1970-01-01T00:00:00".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+            None,
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(0, ts.value());
+                assert_eq!(TimeUnit::Nanosecond, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        match parse_string_to_value(
+            "timestamp_col",
+            "1970-01-01T00:00:00".to_string(),
+            &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+            Some(Timezone::from_tz_string("Asia/Shanghai").unwrap()),
+        )
+        .unwrap()
+        {
+            Value::Timestamp(ts) => {
+                assert_eq!(-1 * 8 * 60 * 60 * 1000_000_000, ts.value());
+                assert_eq!(TimeUnit::Nanosecond, ts.unit());
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
         assert!(parse_string_to_value(
             "timestamp_col",
             "2022-02-22T00:01:01+08".to_string(),
             &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
+            None
         )
         .is_err());
     }
@@ -812,9 +893,13 @@ mod tests {
             },
         ];
 
-        let constraint =
-            parse_column_default_constraint("coll", &ConcreteDataType::Boolean(BooleanType), &opts)
-                .unwrap();
+        let constraint = parse_column_default_constraint(
+            "coll",
+            &ConcreteDataType::Boolean(BooleanType),
+            &opts,
+            None,
+        )
+        .unwrap();
 
         assert_matches!(
             constraint,
@@ -832,7 +917,7 @@ mod tests {
             options: vec![],
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def).unwrap();
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
 
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
@@ -851,7 +936,7 @@ mod tests {
             }],
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def).unwrap();
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
         assert!(!grpc_column_def.is_nullable);
 
         // test primary key
@@ -865,7 +950,7 @@ mod tests {
             }],
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def).unwrap();
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
         assert_eq!(grpc_column_def.semantic_type, SemanticType::Tag as i32);
     }
 
@@ -900,7 +985,7 @@ mod tests {
             options: vec![],
         };
 
-        let column_schema = column_def_to_schema(&column_def, false).unwrap();
+        let column_schema = column_def_to_schema(&column_def, false, None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -910,7 +995,7 @@ mod tests {
         assert!(column_schema.is_nullable());
         assert!(!column_schema.is_time_index());
 
-        let column_schema = column_def_to_schema(&column_def, true).unwrap();
+        let column_schema = column_def_to_schema(&column_def, true, None).unwrap();
 
         assert_eq!("col", column_schema.name);
         assert_eq!(
@@ -936,7 +1021,7 @@ mod tests {
             ],
         };
 
-        let column_schema = column_def_to_schema(&column_def, false).unwrap();
+        let column_schema = column_def_to_schema(&column_def, false, None).unwrap();
 
         assert_eq!("col2", column_schema.name);
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
@@ -953,7 +1038,8 @@ mod tests {
         assert!(sql_value_to_value(
             "test",
             &ConcreteDataType::string_datatype(),
-            &SqlValue::Placeholder("default".into())
+            &SqlValue::Placeholder("default".into()),
+            None
         )
         .is_err());
     }

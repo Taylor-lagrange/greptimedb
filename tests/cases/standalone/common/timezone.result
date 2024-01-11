@@ -1,0 +1,193 @@
+SET time_zone = 'Asia/Shanghai';
+
+Affected Rows: 0
+
+-- Test show statement;
+SHOW VARIABLES time_zone;
+
++---------------+
+| TIME_ZONE     |
++---------------+
+| Asia/Shanghai |
++---------------+
+
+SHOW VARIABLES system_time_zone;
+
++------------------+
+| SYSTEM_TIME_ZONE |
++------------------+
+| UTC              |
++------------------+
+
+-- Test create table default value
+-- 1. In UTC
+SET time_zone = 'UTC';
+
+Affected Rows: 0
+
+CREATE TABLE table_default_value (
+  ts timestamp(3) time index,
+  test timestamp(3) DEFAULT '1970-01-01 08:00:00' PRIMARY KEY,
+);
+
+Affected Rows: 0
+
+INSERT INTO table_default_value (ts) VALUES (0);
+
+Affected Rows: 1
+
+SELECT test::Int64 from table_default_value;
+
++--------------------------+
+| table_default_value.test |
++--------------------------+
+| 28800000                 |
++--------------------------+
+
+DROP TABLE table_default_value;
+
+Affected Rows: 0
+
+-- 2. In Asia/Shanghai
+SET time_zone = 'Asia/Shanghai';
+
+Affected Rows: 0
+
+CREATE TABLE table_default_value (
+  ts timestamp(3) time index,
+  test timestamp(3) DEFAULT '1970-01-01 08:00:00' PRIMARY KEY,
+);
+
+Affected Rows: 0
+
+INSERT INTO table_default_value (ts) VALUES (0);
+
+Affected Rows: 1
+
+SELECT test::Int64 from table_default_value;
+
++--------------------------+
+| table_default_value.test |
++--------------------------+
+| 0                        |
++--------------------------+
+
+DROP TABLE table_default_value;
+
+Affected Rows: 0
+
+-- Test Insert value
+-- 1. In UTC
+SET time_zone = 'UTC';
+
+Affected Rows: 0
+
+CREATE TABLE insert_value (
+  ts timestamp(3) time index,
+  host STRING PRIMARY KEY,
+);
+
+Affected Rows: 0
+
+INSERT INTO TABLE insert_value VALUES
+    ("1970-01-01 08:00:00", 'host1');
+
+Affected Rows: 1
+
+SELECT ts::Int64 from insert_value;
+
++-----------------+
+| insert_value.ts |
++-----------------+
+| 28800000        |
++-----------------+
+
+DELETE FROM insert_value;
+
+Affected Rows: 1
+
+-- 2. In Asia/Shanghai
+SET time_zone = 'Asia/Shanghai';
+
+Affected Rows: 0
+
+INSERT INTO TABLE insert_value VALUES
+    ("1970-01-01 08:00:00", 'host1');
+
+Affected Rows: 1
+
+SELECT ts::Int64 from insert_value;
+
++-----------------+
+| insert_value.ts |
++-----------------+
+| 0               |
++-----------------+
+
+DROP TABLE insert_value;
+
+Affected Rows: 0
+
+-- Test Range query
+CREATE TABLE host (
+  ts timestamp(3) time index,
+  host STRING PRIMARY KEY,
+  val BIGINT,
+);
+
+Affected Rows: 0
+
+INSERT INTO TABLE host VALUES
+    ("1970-01-01T22:30:00+00:00", 'host1', 0),
+    ("1970-01-01T23:30:00+00:00", 'host1', 1),
+    ("1970-01-02T22:30:00+00:00", 'host1', 2),
+    ("1970-01-02T23:30:00+00:00", 'host1', 3),
+    ("1970-01-01T22:30:00+00:00", 'host2', 4),
+    ("1970-01-01T23:30:00+00:00", 'host2', 5),
+    ("1970-01-02T22:30:00+00:00", 'host2', 6),
+    ("1970-01-02T23:30:00+00:00", 'host2', 7);
+
+Affected Rows: 8
+
+SET time_zone = 'UTC';
+
+Affected Rows: 0
+
+SELECT ts::Int64 AS t, host, min(val) RANGE '1d' FROM host ALIGN '1d' TO '1900-01-01T00:00:00+01:00' ORDER BY host, t;
+
++-----------+-------+----------------------------------+
+| t         | host  | MIN(host.val) RANGE 1d FILL NULL |
++-----------+-------+----------------------------------+
+| -3600000  | host1 | 0                                |
+| 82800000  | host1 | 1                                |
+| 169200000 | host1 | 3                                |
+| -3600000  | host2 | 4                                |
+| 82800000  | host2 | 5                                |
+| 169200000 | host2 | 7                                |
++-----------+-------+----------------------------------+
+
+SET time_zone = '+01:00';
+
+Affected Rows: 0
+
+SELECT ts::Int64 AS t, host, min(val) RANGE '1d' FROM host ALIGN '1d' ORDER BY host, t;
+
++-----------+-------+----------------------------------+
+| t         | host  | MIN(host.val) RANGE 1d FILL NULL |
++-----------+-------+----------------------------------+
+| -3600000  | host1 | 0                                |
+| 82800000  | host1 | 1                                |
+| 169200000 | host1 | 3                                |
+| -3600000  | host2 | 4                                |
+| 82800000  | host2 | 5                                |
+| 169200000 | host2 | 7                                |
++-----------+-------+----------------------------------+
+
+DROP TABLE host;
+
+Affected Rows: 0
+
+SET time_zone = 'UTC';
+
+Affected Rows: 0
+

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_time::Timezone;
 use snafu::ResultExt;
 use sqlparser::ast::Ident;
 use sqlparser::dialect::Dialect;
@@ -29,18 +30,35 @@ use crate::statements::transform_statements;
 pub struct ParserContext<'a> {
     pub(crate) parser: Parser<'a>,
     pub(crate) sql: &'a str,
+    pub(crate) tz: Option<Timezone>,
 }
 
 impl<'a> ParserContext<'a> {
     /// Parses SQL with given dialect
     pub fn create_with_dialect(sql: &'a str, dialect: &dyn Dialect) -> Result<Vec<Statement>> {
+        Self::create_with_dialect_inner(sql, dialect, None)
+    }
+
+    pub fn create_with_dialect_tz(
+        sql: &'a str,
+        dialect: &dyn Dialect,
+        tz: Option<Timezone>,
+    ) -> Result<Vec<Statement>> {
+        Self::create_with_dialect_inner(sql, dialect, tz)
+    }
+
+    fn create_with_dialect_inner(
+        sql: &'a str,
+        dialect: &dyn Dialect,
+        tz: Option<Timezone>,
+    ) -> Result<Vec<Statement>> {
         let mut stmts: Vec<Statement> = Vec::new();
 
         let parser = Parser::new(dialect)
             .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
-        let mut parser_ctx = ParserContext { sql, parser };
+        let mut parser_ctx = ParserContext { sql, parser, tz };
 
         let mut expecting_statement_delimiter = false;
         loop {

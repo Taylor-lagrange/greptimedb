@@ -36,7 +36,9 @@ fn convert_to_seconds(arg: &str) -> Option<i64> {
         return Some(dt.val() / 1000);
     }
 
-    if let Ok(ts) = Timestamp::from_str(arg) {
+    // TODO: We currently have no way to pass the query context to the UDF function,
+    // so currently the conversion of `to_unixtime` can only use system time
+    if let Ok(ts) = Timestamp::from_str(arg, None) {
         return Some(ts.split().0);
     }
 

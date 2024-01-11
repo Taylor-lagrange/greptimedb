@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::str::FromStr;
-
 use common_time::timestamp::{TimeUnit, Timestamp};
+use common_time::timezone::get_timezone;
+use common_time::Timezone;
 use datafusion::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
@@ -34,11 +34,23 @@ use datatypes::arrow::datatypes::DataType;
 pub struct TypeConversionRule;
 
 impl AnalyzerRule for TypeConversionRule {
-    fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
+    fn analyze(&self, plan: LogicalPlan, config: &ConfigOptions) -> Result<LogicalPlan> {
+        let tz_config = config.execution.time_zone.as_deref();
+        let timezone = tz_config
+            .map(Timezone::from_tz_string)
+            .transpose()
+            .map_err(|_| {
+                DataFusionError::Plan(format!(
+                    "Illegal Timezone string in TypeConversionRule: `{}`",
+                    tz_config.unwrap_or_default(),
+                ))
+            })?;
+        let tz = get_timezone(timezone);
         plan.transform(&|plan| match plan {
             LogicalPlan::Filter(filter) => {
                 let mut converter = TypeConverter {
                     schema: filter.input.schema().clone(),
+                    timezone: tz.clone(),
                 };
                 let rewritten = filter.predicate.clone().rewrite(&mut converter)?;
                 Ok(Transformed::Yes(LogicalPlan::Filter(Filter::try_new(
@@ -56,6 +68,7 @@ impl AnalyzerRule for TypeConversionRule {
             }) => {
                 let mut converter = TypeConverter {
                     schema: projected_schema.clone(),
+                    timezone: tz.clone(),
                 };
                 let rewrite_filters = filters
                     .into_iter()
@@ -86,6 +99,7 @@ impl AnalyzerRule for TypeConversionRule {
             | LogicalPlan::Analyze { .. } => {
                 let mut converter = TypeConverter {
                     schema: plan.schema().clone(),
+                    timezone: tz.clone(),
                 };
                 let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
                 let expr = plan
@@ -117,6 +131,7 @@ impl AnalyzerRule for TypeConversionRule {
 
 struct TypeConverter {
     schema: DFSchemaRef,
+    timezone: common_time::Timezone,
 }
 
 impl TypeConverter {
@@ -129,9 +144,15 @@ impl TypeConverter {
         None
     }
 
-    fn cast_scalar_value(value: &ScalarValue, target_type: &DataType) -> Result<ScalarValue> {
+    fn cast_scalar_value(
+        &self,
+        value: &ScalarValue,
+        target_type: &DataType,
+    ) -> Result<ScalarValue> {
         match (target_type, value) {
-            (DataType::Timestamp(_, _), ScalarValue::Utf8(Some(v))) => string_to_timestamp_ms(v),
+            (DataType::Timestamp(_, _), ScalarValue::Utf8(Some(v))) => {
+                string_to_timestamp_ms(v, self.timezone.clone())
+            }
             (DataType::Boolean, ScalarValue::Utf8(Some(v))) => match v.to_lowercase().as_str() {
                 "true" => Ok(ScalarValue::Boolean(Some(true))),
                 "false" => Ok(ScalarValue::Boolean(Some(false))),
@@ -167,7 +188,7 @@ impl TypeConverter {
 
         match (left, right) {
             (Expr::Column(col), Expr::Literal(value)) => {
-                let casted_right = Self::cast_scalar_value(value, target_type)?;
+                let casted_right = self.cast_scalar_value(value, target_type)?;
                 if casted_right.is_null() {
                     return Err(DataFusionError::Plan(format!(
                         "column:{col:?}. Casting value:{value:?} to {target_type:?} is invalid",
@@ -176,7 +197,7 @@ impl TypeConverter {
                 Ok((left.clone(), Expr::Literal(casted_right)))
             }
             (Expr::Literal(value), Expr::Column(col)) => {
-                let casted_left = Self::cast_scalar_value(value, target_type)?;
+                let casted_left = self.cast_scalar_value(value, target_type)?;
                 if casted_left.is_null() {
                     return Err(DataFusionError::Plan(format!(
                         "column:{col:?}. Casting value:{value:?} to {target_type:?} is invalid",
@@ -273,8 +294,12 @@ fn timestamp_to_timestamp_ms_expr(val: i64, unit: TimeUnit) -> Expr {
     Expr::Literal(ScalarValue::TimestampMillisecond(Some(timestamp), None))
 }
 
-fn string_to_timestamp_ms(string: &str) -> Result<ScalarValue> {
-    let ts = Timestamp::from_str(string).map_err(|e| DataFusionError::External(Box::new(e)))?;
+fn string_to_timestamp_ms(
+    string: &str,
+    default_timezone: common_time::Timezone,
+) -> Result<ScalarValue> {
+    let ts = Timestamp::from_str(string, Some(default_timezone))
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
     let value = Some(ts.value());
     let scalar = match ts.unit() {
@@ -291,6 +316,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use common_time::timezone::get_timezone;
     use datafusion::logical_expr::expr::AggregateFunction as AggrExpr;
     use datafusion_common::{Column, DFField, DFSchema};
     use datafusion_expr::{AggregateFunction, LogicalPlanBuilder};
@@ -301,12 +327,24 @@ mod tests {
     #[test]
     fn test_string_to_timestamp_ms() {
         assert_eq!(
-            string_to_timestamp_ms("2022-02-02 19:00:00+08:00").unwrap(),
+            string_to_timestamp_ms("2022-02-02 19:00:00+08:00", get_timezone(None)).unwrap(),
             ScalarValue::TimestampSecond(Some(1643799600), None)
         );
         assert_eq!(
-            string_to_timestamp_ms("2009-02-13 23:31:30Z").unwrap(),
+            string_to_timestamp_ms("2009-02-13 23:31:30Z", get_timezone(None)).unwrap(),
             ScalarValue::TimestampSecond(Some(1234567890), None)
+        );
+        assert_eq!(
+            string_to_timestamp_ms("1970-01-01 08:00:00+08:00", get_timezone(None)).unwrap(),
+            ScalarValue::TimestampSecond(Some(0), None)
+        );
+        assert_eq!(
+            string_to_timestamp_ms(
+                "1970-01-01 08:00:00",
+                Timezone::from_tz_string("Asia/Shanghai").unwrap()
+            )
+            .unwrap(),
+            ScalarValue::TimestampSecond(Some(0), None)
         );
     }
 
@@ -363,7 +401,10 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut converter = TypeConverter { schema };
+        let mut converter = TypeConverter {
+            schema,
+            timezone: get_timezone(None),
+        };
 
         assert_eq!(
             Expr::Column(Column::from_name("ts")).gt(Expr::Literal(ScalarValue::TimestampSecond(
@@ -374,6 +415,20 @@ mod tests {
                 .mutate(
                     Expr::Column(Column::from_name("ts")).gt(Expr::Literal(ScalarValue::Utf8(
                         Some("2020-09-08T05:42:29+08:00".to_string()),
+                    )))
+                )
+                .unwrap()
+        );
+
+        converter.timezone = Timezone::from_tz_string("Asia/Shanghai").unwrap();
+
+        assert_eq!(
+            Expr::Column(Column::from_name("ts"))
+                .gt(Expr::Literal(ScalarValue::TimestampSecond(Some(0), None))),
+            converter
+                .mutate(
+                    Expr::Column(Column::from_name("ts")).gt(Expr::Literal(ScalarValue::Utf8(
+                        Some("1970-01-01 08:00:00".to_string()),
                     )))
                 )
                 .unwrap()
@@ -395,7 +450,10 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut converter = TypeConverter { schema };
+        let mut converter = TypeConverter {
+            schema,
+            timezone: get_timezone(None),
+        };
 
         assert_eq!(
             Expr::Column(Column::from_name(col_name))

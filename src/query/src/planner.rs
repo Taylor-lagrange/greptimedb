@@ -56,6 +56,8 @@ impl DfLogicalPlanner {
     async fn plan_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let df_stmt = (&stmt).try_into().context(SqlSnafu)?;
 
+        let tz = query_ctx.timezone();
+
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
@@ -81,7 +83,8 @@ impl DfLogicalPlanner {
         let result = sql_to_rel
             .statement_to_plan(df_stmt)
             .context(PlanSqlSnafu)?;
-        let plan = RangePlanRewriter::new(table_provider)
+
+        let plan = RangePlanRewriter::new(table_provider, tz)
             .rewrite(result)
             .await?;
         Ok(LogicalPlan::DfPlan(plan))

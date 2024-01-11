@@ -16,7 +16,6 @@ use core::default::Default;
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
-use std::str::FromStr;
 use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
@@ -352,14 +351,15 @@ impl Timestamp {
     pub fn from_chrono_date(date: NaiveDate) -> Option<Self> {
         Timestamp::from_chrono_datetime(date.and_time(NaiveTime::default()))
     }
-}
-
-impl FromStr for Timestamp {
-    type Err = Error;
 
     /// Accepts a string in RFC3339 / ISO8601 standard format and some variants and converts it to a nanosecond precision timestamp.
     /// This code is copied from [arrow-datafusion](https://github.com/apache/arrow-datafusion/blob/arrow2/datafusion-physical-expr/src/arrow_temporal_util.rs#L71)
     /// with some bugfixes.
+    ///
+    /// If the timestamp str `s` does not carry a time zone:
+    /// 1. `default_timezone` is `Some`: `default_timezone` will be used as the default time zone.
+    /// 2. `default_timezone` is `None`: system timezone will be used as the default time zone.
+    ///
     /// Supported format:
     /// - `2022-09-20T14:16:43.012345Z` (Zulu timezone)
     /// - `2022-09-20T14:16:43.012345+08:00` (Explicit offset)
@@ -369,7 +369,7 @@ impl FromStr for Timestamp {
     /// - `2022-09-20 14:16:43` (Zulu timezone, without T)
     /// - `2022-09-20 14:16:43.012345` (Zulu timezone, without T)
     #[allow(deprecated)]
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    pub fn from_str(s: &str, default_timezone: Option<Timezone>) -> Result<Self, Error> {
         // RFC3339 timestamp (with a T)
         let s = s.trim();
         if let Ok(ts) = DateTime::parse_from_rfc3339(s) {
@@ -386,19 +386,19 @@ impl FromStr for Timestamp {
         }
 
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
-            return naive_datetime_to_timestamp(s, ts);
+            return naive_datetime_to_timestamp(s, ts, default_timezone);
         }
 
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
-            return naive_datetime_to_timestamp(s, ts);
+            return naive_datetime_to_timestamp(s, ts, default_timezone);
         }
 
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-            return naive_datetime_to_timestamp(s, ts);
+            return naive_datetime_to_timestamp(s, ts, default_timezone);
         }
 
         if let Ok(ts) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
-            return naive_datetime_to_timestamp(s, ts);
+            return naive_datetime_to_timestamp(s, ts, default_timezone);
         }
 
         ParseTimestampSnafu { raw: s }.fail()
@@ -410,9 +410,19 @@ impl FromStr for Timestamp {
 fn naive_datetime_to_timestamp(
     s: &str,
     datetime: NaiveDateTime,
+    default_timezone: Option<Timezone>,
 ) -> crate::error::Result<Timestamp> {
-    Timestamp::from_chrono_datetime(Utc.from_utc_datetime(&datetime).naive_utc())
-        .context(ParseTimestampSnafu { raw: s })
+    let tz = match get_timezone(default_timezone) {
+        crate::Timezone::Offset(offset) => match offset.from_local_datetime(&datetime) {
+            chrono::LocalResult::Single(t) => t.naive_utc(),
+            _ => return ParseTimestampSnafu { raw: s }.fail(),
+        },
+        crate::Timezone::Named(tz) => match tz.from_local_datetime(&datetime) {
+            chrono::LocalResult::Single(t) => t.naive_utc(),
+            _ => return ParseTimestampSnafu { raw: s }.fail(),
+        },
+    };
+    Timestamp::from_chrono_datetime(tz).context(ParseTimestampSnafu { raw: s })
 }
 
 impl From<i64> for Timestamp {
@@ -766,7 +776,7 @@ mod tests {
     // Input timestamp string is regarded as local timezone if no timezone is specified,
     // but expected timestamp is in UTC timezone
     fn check_from_str(s: &str, expect: &str) {
-        let ts = Timestamp::from_str(s).unwrap();
+        let ts = Timestamp::from_str(s, None).unwrap();
         let time = ts.to_chrono_datetime().unwrap();
         assert_eq!(expect, time.to_string());
     }
@@ -792,7 +802,7 @@ mod tests {
     fn test_to_iso8601_string() {
         set_default_timezone(Some("Asia/Shanghai")).unwrap();
         let datetime_str = "2020-09-08 13:42:29.042+0000";
-        let ts = Timestamp::from_str(datetime_str).unwrap();
+        let ts = Timestamp::from_str(datetime_str, None).unwrap();
         assert_eq!("2020-09-08 21:42:29.042+0800", ts.to_iso8601_string());
 
         let ts_millis = 1668070237000;
@@ -1059,17 +1069,17 @@ mod tests {
         std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!(
             Timestamp::new(28800, TimeUnit::Second),
-            Timestamp::from_str("1970-01-01 08:00:00.000").unwrap()
+            Timestamp::from_str("1970-01-01 08:00:00.000", None).unwrap()
         );
 
         assert_eq!(
             Timestamp::new(28800, TimeUnit::Second),
-            Timestamp::from_str("1970-01-01 08:00:00").unwrap()
+            Timestamp::from_str("1970-01-01 08:00:00", None).unwrap()
         );
 
         assert_eq!(
             Timestamp::new(28800, TimeUnit::Second),
-            Timestamp::from_str("      1970-01-01        08:00:00    ").unwrap()
+            Timestamp::from_str("      1970-01-01        08:00:00    ", None).unwrap()
         );
     }
 
@@ -1236,7 +1246,7 @@ mod tests {
         ];
 
         for s in valid_strings {
-            Timestamp::from_str(s).unwrap();
+            Timestamp::from_str(s, None).unwrap();
         }
     }
 }

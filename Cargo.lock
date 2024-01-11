@@ -8879,6 +8879,8 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-time",
+ "once_cell",
+ "regex",
  "serde",
  "serde_json",
  "sqlness",

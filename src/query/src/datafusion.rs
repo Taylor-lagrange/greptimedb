@@ -40,8 +40,12 @@ use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
+use datafusion_common::config::ConfigOptions;
 use datafusion_common::{ResolvedTableReference, ScalarValue};
-use datafusion_expr::{DmlStatement, Expr as DfExpr, LogicalPlan as DfLogicalPlan, WriteOp};
+use datafusion_expr::{
+    DmlStatement, Explain, Expr as DfExpr, LogicalPlan as DfLogicalPlan, WriteOp,
+};
+use datafusion_optimizer::analyzer::AnalyzerRule;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
 use futures_util::StreamExt;
@@ -60,6 +64,7 @@ use crate::error::{
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
+use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
@@ -87,6 +92,7 @@ impl DatafusionQueryEngine {
         let mut ctx = QueryEngineContext::new(self.state.session_state(), query_ctx.clone());
 
         // `create_physical_plan` will optimize logical plan internally
+        let plan = self.convert_plan_type(plan, &query_ctx)?;
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
         let optimized_physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
@@ -97,6 +103,37 @@ impl DatafusionQueryEngine {
         };
 
         Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
+    }
+
+    /// TODO(Taylor-lagrange): The TypeConversionRule need QueryContext Timezone info to execute convert correctly.
+    /// But now there is no good way to pass the timezone information to the TypeConversionRule by Datafusion native optimizer,
+    /// so now the TypeConversionRule is executed separately.
+    fn convert_plan_type(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: &QueryContextRef,
+    ) -> Result<LogicalPlan> {
+        let rule = TypeConversionRule;
+        let mut config = ConfigOptions::new();
+        config.execution.time_zone = Some(query_ctx.timezone().to_string());
+        match plan {
+            LogicalPlan::DfPlan(DfLogicalPlan::Explain(e)) => {
+                let plan = rule
+                    .analyze(e.plan.as_ref().clone(), &config)
+                    .context(DataFusionSnafu)?;
+                Ok(LogicalPlan::DfPlan(DfLogicalPlan::Explain(Explain {
+                    verbose: e.verbose,
+                    plan: Arc::new(plan),
+                    stringified_plans: e.stringified_plans,
+                    schema: e.schema,
+                    logical_optimization_succeeded: e.logical_optimization_succeeded,
+                })))
+            }
+            LogicalPlan::DfPlan(plan) => rule
+                .analyze(plan, &config)
+                .map(LogicalPlan::DfPlan)
+                .context(DataFusionSnafu),
+        }
     }
 
     #[tracing::instrument(skip_all)]

@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use common_catalog::consts::default_engine;
+use common_time::Timezone;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -182,7 +183,7 @@ impl<'a> ParserContext<'a> {
             table_id: 0, // table id is assigned by catalog manager
             partitions,
         };
-        validate_create(&create_table)?;
+        validate_create(&create_table, self.tz.clone())?;
 
         Ok(Statement::CreateTable(create_table))
     }
@@ -600,9 +601,9 @@ impl<'a> ParserContext<'a> {
     }
 }
 
-fn validate_create(create_table: &CreateTable) -> Result<()> {
+fn validate_create(create_table: &CreateTable, tz: Option<Timezone>) -> Result<()> {
     if let Some(partitions) = &create_table.partitions {
-        validate_partitions(&create_table.columns, partitions)?;
+        validate_partitions(&create_table.columns, partitions, tz)?;
     }
     validate_time_index(create_table)?;
 
@@ -688,14 +689,18 @@ fn get_real_timestamp_type(data_type: &DataType) -> DataType {
     }
 }
 
-fn validate_partitions(columns: &[ColumnDef], partitions: &Partitions) -> Result<()> {
+fn validate_partitions(
+    columns: &[ColumnDef],
+    partitions: &Partitions,
+    tz: Option<Timezone>,
+) -> Result<()> {
     let partition_columns = ensure_partition_columns_defined(columns, partitions)?;
 
     ensure_partition_names_no_duplicate(partitions)?;
 
     ensure_value_list_len_matches_columns(partitions, &partition_columns)?;
 
-    let value_lists = ensure_value_lists_strictly_increased(partitions, partition_columns)?;
+    let value_lists = ensure_value_lists_strictly_increased(partitions, partition_columns, tz)?;
 
     ensure_value_lists_bounded_by_maxvalue(value_lists)?;
 
@@ -730,6 +735,7 @@ fn ensure_value_lists_bounded_by_maxvalue(value_lists: Vec<&Vec<Value>>) -> Resu
 fn ensure_value_lists_strictly_increased<'a>(
     partitions: &'a Partitions,
     partition_columns: Vec<&'a ColumnDef>,
+    tz: Option<Timezone>,
 ) -> Result<Vec<&'a Vec<Value>>> {
     let value_lists = partitions
         .entries
@@ -753,8 +759,8 @@ fn ensure_value_lists_strictly_increased<'a>(
                 (false, false) => {
                     let column_name = &column.name.value;
                     let cdt = sql_data_type_to_concrete_data_type(&column.data_type)?;
-                    let x = sql_value_to_value(column_name, &cdt, x)?;
-                    let y = sql_value_to_value(column_name, &cdt, y)?;
+                    let x = sql_value_to_value(column_name, &cdt, x, tz.clone())?;
+                    let y = sql_value_to_value(column_name, &cdt, y, tz.clone())?;
                     match x.cmp(&y) {
                         Ordering::Less => break,
                         Ordering::Equal => equal_tuples += 1,

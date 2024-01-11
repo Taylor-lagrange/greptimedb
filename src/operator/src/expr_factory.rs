@@ -22,6 +22,7 @@ use api::v1::{
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
+use common_time::Timezone;
 use datatypes::schema::{ColumnSchema, COMMENT_KEY};
 use file_engine::FileOptions;
 use query::sql::{
@@ -121,6 +122,8 @@ pub(crate) async fn create_external_expr(
     create: CreateExternalTable,
     query_ctx: QueryContextRef,
 ) -> Result<CreateTableExpr> {
+    let tz = query_ctx.timezone();
+
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, query_ctx)
             .map_err(BoxedError::new)
@@ -141,7 +144,7 @@ pub(crate) async fn create_external_expr(
         // expanded form
         let time_index = find_time_index(&create.constraints)?;
         let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
-        let column_schemas = columns_to_column_schemas(&create.columns, &time_index)?;
+        let column_schemas = columns_to_column_schemas(&create.columns, &time_index, Some(tz))?;
         (time_index, primary_keys, column_schemas)
     } else {
         // inferred form
@@ -181,6 +184,8 @@ pub(crate) async fn create_external_expr(
 
 /// Convert `CreateTable` statement to `CreateExpr` gRPC request.
 pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Result<CreateTableExpr> {
+    let tz = query_ctx.timezone();
+
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name, query_ctx)
             .map_err(BoxedError::new)
@@ -199,7 +204,7 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
         schema_name,
         table_name,
         desc: "".to_string(),
-        column_defs: columns_to_expr(&create.columns, &time_index, &primary_keys)?,
+        column_defs: columns_to_expr(&create.columns, &time_index, &primary_keys, Some(tz))?,
         time_index,
         primary_keys,
         create_if_not_exists: create.if_not_exists,
@@ -293,18 +298,23 @@ fn columns_to_expr(
     column_defs: &[ColumnDef],
     time_index: &str,
     primary_keys: &[String],
+    tz: Option<Timezone>,
 ) -> Result<Vec<api::v1::ColumnDef>> {
-    let column_schemas = columns_to_column_schemas(column_defs, time_index)?;
+    let column_schemas = columns_to_column_schemas(column_defs, time_index, tz)?;
     column_schemas_to_defs(column_schemas, primary_keys)
 }
 
 fn columns_to_column_schemas(
     column_defs: &[ColumnDef],
     time_index: &str,
+    tz: Option<Timezone>,
 ) -> Result<Vec<ColumnSchema>> {
     column_defs
         .iter()
-        .map(|c| column_def_to_schema(c, c.name.to_string() == time_index).context(ParseSqlSnafu))
+        .map(|c| {
+            column_def_to_schema(c, c.name.to_string() == time_index, tz.clone())
+                .context(ParseSqlSnafu)
+        })
         .collect::<Result<Vec<ColumnSchema>>>()
 }
 
@@ -364,6 +374,8 @@ pub(crate) fn to_alter_expr(
     alter_table: AlterTable,
     query_ctx: QueryContextRef,
 ) -> Result<AlterExpr> {
+    let tz = query_ctx.timezone();
+
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(alter_table.table_name(), query_ctx)
             .map_err(BoxedError::new)
@@ -382,7 +394,7 @@ pub(crate) fn to_alter_expr(
         } => Kind::AddColumns(AddColumns {
             add_columns: vec![AddColumn {
                 column_def: Some(
-                    sql_column_def_to_grpc_column_def(column_def)
+                    sql_column_def_to_grpc_column_def(column_def, Some(tz))
                         .map_err(BoxedError::new)
                         .context(ExternalSnafu)?,
                 ),

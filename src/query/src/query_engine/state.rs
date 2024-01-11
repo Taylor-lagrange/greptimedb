@@ -41,7 +41,6 @@ use table::TableRef;
 use crate::dist_plan::{DistExtensionPlanner, DistPlannerAnalyzer};
 use crate::optimizer::order_hint::OrderHintRule;
 use crate::optimizer::string_normalization::StringNormalizationRule;
-use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
@@ -80,7 +79,6 @@ impl QueryEngineState {
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         // Apply the type conversion rule first.
         let mut analyzer = Analyzer::new();
-        analyzer.rules.insert(0, Arc::new(TypeConversionRule));
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
         Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
         analyzer.rules.insert(0, Arc::new(CountWildcardRule {}));

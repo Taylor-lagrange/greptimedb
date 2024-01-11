@@ -30,6 +30,8 @@ use client::{
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
 use tinytemplate::TinyTemplate;
@@ -40,6 +42,10 @@ use crate::util;
 const METASRV_ADDR: &str = "127.0.0.1:3002";
 const SERVER_ADDR: &str = "127.0.0.1:4001";
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
+
+// Timezone settings
+static SET_TIME_ZONE_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^SET TIME_ZONE\s*=\s*'(\S+)'").unwrap());
 
 #[derive(Clone)]
 pub enum WalConfig {
@@ -408,6 +414,11 @@ impl Database for GreptimeDB {
                 .expect("Illegal `USE` statement: expecting a database.")
                 .trim_end_matches(';');
             client.set_schema(database);
+            Box::new(ResultDisplayer {
+                result: Ok(Output::AffectedRows(0)),
+            }) as _
+        } else if let Some(captures) = SET_TIME_ZONE_PATTERN.captures(&query) {
+            client.set_timezone(captures.get(1).unwrap().as_str());
             Box::new(ResultDisplayer {
                 result: Ok(Output::AffectedRows(0)),
             }) as _

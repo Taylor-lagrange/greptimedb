@@ -40,6 +40,7 @@ use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::error;
 use common_telemetry::logging::info;
+use common_time::Timezone;
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
@@ -252,8 +253,12 @@ impl FrontendInstance for Instance {
     }
 }
 
-fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
-    ParserContext::create_with_dialect(sql, dialect).context(ParseSqlSnafu)
+fn parse_stmt(
+    sql: &str,
+    dialect: &(dyn Dialect + Send + Sync),
+    tz: Option<Timezone>,
+) -> Result<Vec<Statement>> {
+    ParserContext::create_with_dialect_tz(sql, dialect, tz).context(ParseSqlSnafu)
 }
 
 impl Instance {
@@ -284,8 +289,12 @@ impl SqlQueryHandler for Instance {
         let checker_ref = self.plugins.get::<PermissionCheckerRef>();
         let checker = checker_ref.as_ref();
 
-        match parse_stmt(query.as_ref(), query_ctx.sql_dialect())
-            .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
+        match parse_stmt(
+            query.as_ref(),
+            query_ctx.sql_dialect(),
+            Some(query_ctx.timezone()),
+        )
+        .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
             Ok(stmts) => {
                 let mut results = Vec::with_capacity(stmts.len());
@@ -531,7 +540,7 @@ mod tests {
         CREATE DATABASE test_database;
         SHOW DATABASES;
         "#;
-        let stmts = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        let stmts = parse_stmt(sql, &GreptimeDbDialect {}, None).unwrap();
         assert_eq!(stmts.len(), 4);
         for stmt in stmts {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
@@ -542,7 +551,7 @@ mod tests {
         SHOW CREATE TABLE demo;
         ALTER TABLE demo ADD COLUMN new_col INT;
         "#;
-        let stmts = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        let stmts = parse_stmt(sql, &GreptimeDbDialect {}, None).unwrap();
         assert_eq!(stmts.len(), 2);
         for stmt in stmts {
             let re = check_permission(plugins.clone(), &stmt, &query_ctx);
@@ -576,7 +585,7 @@ mod tests {
         }
 
         fn do_test(sql: &str, plugins: Plugins, query_ctx: &QueryContextRef, is_ok: bool) {
-            let stmt = &parse_stmt(sql, &GreptimeDbDialect {}).unwrap()[0];
+            let stmt = &parse_stmt(sql, &GreptimeDbDialect {}, None).unwrap()[0];
             let re = check_permission(plugins, stmt, query_ctx);
             if is_ok {
                 re.unwrap();
@@ -604,11 +613,11 @@ mod tests {
 
         // test show tables
         let sql = "SHOW TABLES FROM public";
-        let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        let stmt = parse_stmt(sql, &GreptimeDbDialect {}, None).unwrap();
         check_permission(plugins.clone(), &stmt[0], &query_ctx).unwrap();
 
         let sql = "SHOW TABLES FROM private";
-        let stmt = parse_stmt(sql, &GreptimeDbDialect {}).unwrap();
+        let stmt = parse_stmt(sql, &GreptimeDbDialect {}, None).unwrap();
         let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
         assert!(re.is_ok());
 
